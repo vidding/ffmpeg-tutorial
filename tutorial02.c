@@ -27,6 +27,7 @@
 #endif
 
 #include <stdio.h>
+#define SDL2
 
 int main(int argc, char *argv[]) {
   AVFormatContext *pFormatCtx = NULL;
@@ -41,8 +42,16 @@ int main(int argc, char *argv[]) {
   AVDictionary    *optionsDict = NULL;
   struct SwsContext *sws_ctx = NULL;
 
-  SDL_Overlay     *bmp = NULL;
-  SDL_Surface     *screen = NULL;
+#ifdef SDL2
+  SDL_Texture	*bmp = NULL;
+  SDL_Renderer	*sdlRenderer = NULL;
+  SDL_Window	*screen = NULL;
+  AVFrame		*pFrameYUV = NULL;
+  unsigned char *out_buffer;
+#else
+  SDL_Overlayer	*bmp = NULL;
+  SDL_Surface	*screen = NULL;
+#endif  
   SDL_Rect        rect;
   SDL_Event       event;
 
@@ -95,23 +104,48 @@ int main(int argc, char *argv[]) {
   
   // Allocate video frame
   pFrame=av_frame_alloc();
+#ifdef SDL2
+  pFrameYUV = av_frame_alloc();
+  out_buffer = (unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height, 1));
+  av_image_fill_arrays(pFrameYUV->data, pFrameYUV->linesize, out_buffer,
+	  AV_PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height, 1);
 
+  //SDL 2.0 Support for multiple windows  
+  screen = SDL_CreateWindow("Simplest ffmpeg player's Window", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+	  pCodecCtx->width, pCodecCtx->height,
+	  SDL_WINDOW_OPENGL);
+
+	if (!screen) {
+		printf("SDL: could not create window - exiting:%s\n", SDL_GetError());
+		return -1;
+	}
+
+  sdlRenderer = SDL_CreateRenderer(screen, -1, 0);
+  //IYUV: Y + U + V  (3 planes)  
+  //YV12: Y + V + U  (3 planes)  
+  bmp = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, pCodecCtx->width, pCodecCtx->height);
+  rect.x = 0;
+  rect.y = 0;
+  rect.w = pCodecCtx->width;
+  rect.h = pCodecCtx->height;
+#else
   // Make a screen to put our video
 #ifndef __DARWIN__
         screen = SDL_SetVideoMode(pCodecCtx->width, pCodecCtx->height, 0, 0);
 #else
         screen = SDL_SetVideoMode(pCodecCtx->width, pCodecCtx->height, 24, 0);
 #endif
-  if(!screen) {
-    fprintf(stderr, "SDL: could not set video mode - exiting\n");
-    exit(1);
-  }
-  
-  // Allocate a place to put our YUV image on that screen
-  bmp = SDL_CreateYUVOverlay(pCodecCtx->width,
-				 pCodecCtx->height,
-				 SDL_YV12_OVERLAY,
-				 screen);
+	if (!screen) {
+		printf("SDL: could not create window - exiting:%s\n", SDL_GetError());
+		return -1;
+	}
+
+	// Allocate a place to put our YUV image on that screen
+	bmp = SDL_CreateYUVOverlay(pCodecCtx->width,
+		pCodecCtx->height,
+		SDL_YV12_OVERLAY,
+		screen);
+#endif	
   
   sws_ctx =
     sws_getContext
@@ -121,8 +155,8 @@ int main(int argc, char *argv[]) {
         pCodecCtx->pix_fmt,
         pCodecCtx->width,
         pCodecCtx->height,
-        PIX_FMT_YUV420P,
-        SWS_BILINEAR,
+        AV_PIX_FMT_YUV420P,
+        SWS_BILINEAR,  // SWS_BICUBIC
         NULL,
         NULL,
         NULL
@@ -139,6 +173,33 @@ int main(int argc, char *argv[]) {
       
       // Did we get a video frame?
       if(frameFinished) {
+#ifdef SDL2
+		  sws_scale(sws_ctx, (const unsigned char* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height,
+			  pFrameYUV->data, pFrameYUV->linesize);
+
+#if OUTPUT_YUV420P  
+		  y_size = pCodecCtx->width*pCodecCtx->height;
+		  fwrite(pFrameYUV->data[0], 1, y_size, fp_yuv);    //Y   
+		  fwrite(pFrameYUV->data[1], 1, y_size / 4, fp_yuv);  //U  
+		  fwrite(pFrameYUV->data[2], 1, y_size / 4, fp_yuv);  //V  
+#endif  
+															  //SDL---------------------------  
+#if 0  
+		  SDL_UpdateTexture(sdlTexture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0]);
+#else  
+		  SDL_UpdateYUVTexture(bmp, &rect,
+			  pFrameYUV->data[0], pFrameYUV->linesize[0],
+			  pFrameYUV->data[1], pFrameYUV->linesize[1],
+			  pFrameYUV->data[2], pFrameYUV->linesize[2]);
+#endif    
+
+		  SDL_RenderClear(sdlRenderer);
+		  SDL_RenderCopy(sdlRenderer, bmp, NULL, &rect);
+		  SDL_RenderPresent(sdlRenderer);
+		  //SDL End-----------------------  
+		  //Delay 40ms  
+		  SDL_Delay(40);
+#else
 	SDL_LockYUVOverlay(bmp);
 
 	AVPicture pict;
@@ -169,7 +230,7 @@ int main(int argc, char *argv[]) {
 	rect.w = pCodecCtx->width;
 	rect.h = pCodecCtx->height;
 	SDL_DisplayYUVOverlay(bmp, &rect);
-      
+#endif      
       }
     }
     
